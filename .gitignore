@@ -1,0 +1,12 @@
+**/.vs
+**/bin
+**/App_Data
+**/obj
+**/Umbraco
+**/packages
+**/.user
+**/.csproj.user
+**/node_modules
+**/lib
+
+
