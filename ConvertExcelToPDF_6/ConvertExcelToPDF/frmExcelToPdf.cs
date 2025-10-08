@@ -47,7 +47,7 @@ namespace ConvertExcelToPDF
         {
             try
             {
-                string excelFolder = txtExcelFolder.Text.Trim();
+                string excelFolder = txtDesExcelFolder.Text.Trim();
                 string pdfFolder = txtPdfFolder.Text.Trim();
 
                 if (!ValidateFolders(excelFolder, pdfFolder))
@@ -330,61 +330,78 @@ namespace ConvertExcelToPDF
         {
             try
             {
-                //ExportExcelToPdf_Interop(excelPath, pdfPath, cancellationToken);
-                //return;
-                // Log detailed steps
-                if (Path.GetExtension(excelPath).Equals(".xls", StringComparison.OrdinalIgnoreCase))
-                {
-                    LogAsync($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] Detected legacy .xls file. Converting to .xlsx...").GetAwaiter().GetResult();
-                    excelPath = ConvertXlsToXlsx_Interop(excelPath, pdfPath);
-                    LogAsync($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] Conversion complete: {excelPath}").GetAwaiter().GetResult();
-                }
-                LogAsync($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] Loading Excel file: {Path.GetFileName(excelPath)}").GetAwaiter().GetResult();
+                LogAsync($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] Starting conversion: {Path.GetFileName(excelPath)}").GetAwaiter().GetResult();
+
+
+                // Load Excel
                 using var workbook = new Workbook();
-                workbook.LoadFromFile(excelPath, false);
-                LogAsync($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] Loaded Excel file: {Path.GetFileName(excelPath)}").GetAwaiter().GetResult();
+                workbook.LoadFromFile(excelPath);
+                LogAsync($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] Loaded Excel workbook with {workbook.Worksheets.Count} sheets.").GetAwaiter().GetResult();
+
+                if (workbook.Worksheets.Count == 1)
+                {
+                    workbook.SaveToFile(pdfPath, XlsFileFormat.PDF);
+                    LogAsync($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] Saved single-sheet PDF: {Path.GetFileName(pdfPath)}").GetAwaiter().GetResult();
+                    return;
+                }
 
                 using var finalDoc = new PdfDocument();
-                int sheetCount = workbook.Worksheets.Count;
-                LogAsync($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] Processing {sheetCount} worksheets in {Path.GetFileName(excelPath)}").GetAwaiter().GetResult();
+                var tempParts = new List<(PdfDocument doc, MemoryStream stream)>();
 
+                int sheetIndex = 0;
                 foreach (Worksheet sheet in workbook.Worksheets)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
-                    LogAsync($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] Processing worksheet: {sheet.Name}").GetAwaiter().GetResult();
+                    sheetIndex++;
+                    string sheetName = string.IsNullOrWhiteSpace(sheet.Name) ? $"Sheet{sheetIndex}" : sheet.Name;
+
+                    LogAsync($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] Processing sheet: {sheetName}").GetAwaiter().GetResult();
 
                     using var singleSheetWorkbook = new Workbook();
                     singleSheetWorkbook.Worksheets.Clear();
                     singleSheetWorkbook.Worksheets.AddCopy(sheet);
 
-                    var adjustedSheet = singleSheetWorkbook.Worksheets[0];
-                    adjustedSheet.PageSetup.PrintArea = null;          
-                    adjustedSheet.PageSetup.FitToPagesWide = 1;
-                    adjustedSheet.PageSetup.FitToPagesTall = 1;
-                    adjustedSheet.PageSetup.IsPrintHeadings = false;
-                    adjustedSheet.PageSetup.IsPrintGridlines = false;
+                    var ws = singleSheetWorkbook.Worksheets[0];
+                    ws.PageSetup.PrintArea = null;
+                    ws.PageSetup.FitToPagesWide = 1;
+                    ws.PageSetup.FitToPagesTall = 1;
+                    ws.PageSetup.IsPrintHeadings = false;
+                    ws.PageSetup.IsPrintGridlines = false;
 
-                    using var pdfStream = new MemoryStream();
+                    var pdfStream = new MemoryStream();
                     singleSheetWorkbook.SaveToStream(pdfStream, XlsFileFormat.PDF);
                     pdfStream.Position = 0;
-                    LogAsync($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] Converted worksheet {sheet.Name} to PDF stream").GetAwaiter().GetResult();
 
-                    using var partDoc = new PdfDocument();
-                    partDoc.LoadFromStream(pdfStream);
+                    var partDoc = new PdfDocument(pdfStream);
+                    tempParts.Add((partDoc, pdfStream));
+
                     finalDoc.AppendPage(partDoc);
-                    LogAsync($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] Appended worksheet {sheet.Name} to final PDF").GetAwaiter().GetResult();
+                    LogAsync($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] Appended {sheetName} to final PDF.").GetAwaiter().GetResult();
                 }
 
+
                 cancellationToken.ThrowIfCancellationRequested();
-                LogAsync($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] Saving PDF to: {Path.GetFileName(pdfPath)}").GetAwaiter().GetResult();
+                LogAsync($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] Saving merged PDF: {Path.GetFileName(pdfPath)}").GetAwaiter().GetResult();
                 finalDoc.SaveToFile(pdfPath);
-                LogAsync($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] Saved PDF to: {Path.GetFileName(pdfPath)}").GetAwaiter().GetResult();
+                LogAsync($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] Successfully saved: {pdfPath}").GetAwaiter().GetResult();
+
+                foreach (var (doc, stream) in tempParts)
+                {
+                    doc.Dispose();
+                    stream.Dispose();
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                LogAsync($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] Conversion cancelled for {Path.GetFileName(excelPath)}").GetAwaiter().GetResult();
             }
             catch (Exception ex)
             {
-                throw new Exception($"Failed to convert {Path.GetFileName(excelPath)} to PDF", ex);
+                LogAsync($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] ERROR converting {Path.GetFileName(excelPath)}: {ex}").GetAwaiter().GetResult();
+                throw new Exception($"Failed to convert {Path.GetFileName(excelPath)} to PDF. See log for details.", ex);
             }
         }
+
 
         private string ConvertXlsToXlsx_Interop(string sourcePath, string pdfPath)
         {
@@ -530,6 +547,94 @@ namespace ConvertExcelToPDF
             catch (Exception ex)
             {
                 LogAsync($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] Failed to clean up temporary folder: {ex.Message}").GetAwaiter().GetResult();
+            }
+        }
+
+        private void btnChooseDescExcelFolder_Click(object sender, EventArgs e)
+        {
+            SelectFolder(txtDesExcelFolder);
+        }
+
+        private void bnConvertToXLSX_Click(object sender, EventArgs e)
+        {
+            string sourceExcelFolder = txtExcelFolder.Text.Trim();
+            string destinationExcelFolder = txtDesExcelFolder.Text.Trim();
+
+            if (!Directory.Exists(sourceExcelFolder))
+            {
+                MessageBox.Show("Source folder does not exist.", "Error",
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+
+            if (!Directory.Exists(destinationExcelFolder))
+            {
+                Directory.CreateDirectory(destinationExcelFolder);
+            }
+
+            var excelFiles = Directory.EnumerateFiles(sourceExcelFolder)
+                .Where(file => file.EndsWith(".xls", StringComparison.OrdinalIgnoreCase) ||
+                               file.EndsWith(".xlsx", StringComparison.OrdinalIgnoreCase))
+                .GroupBy(file => Path.GetFileNameWithoutExtension(file), StringComparer.OrdinalIgnoreCase)
+                .Select(group => group.OrderByDescending(file => file.EndsWith(".xlsx", StringComparison.OrdinalIgnoreCase)).First())
+                .ToArray();
+
+            if (excelFiles.Length == 0)
+            {
+                MessageBox.Show("No Excel files found in the selected folder.", "Information",
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            Excel.Application excelApp = null;
+            try
+            {
+                excelApp = new Excel.Application();
+                excelApp.DisplayAlerts = false;
+
+                foreach (var file in excelFiles)
+                {
+                    string fileName = Path.GetFileNameWithoutExtension(file);
+                    string destFilePath = Path.Combine(destinationExcelFolder, fileName + ".xlsx");
+
+                    if (file.EndsWith(".xls", StringComparison.OrdinalIgnoreCase))
+                    {
+                        try
+                        {
+                            Excel.Workbook workbook = excelApp.Workbooks.Open(file);
+                            workbook.SaveAs(destFilePath, Excel.XlFileFormat.xlOpenXMLWorkbook);
+                            workbook.Close();
+                            LogAsync($"Converted .xls to .xlsx: {fileName}");
+                        }
+                        catch (Exception ex)
+                        {
+                            LogAsync($"Failed to convert {fileName}.xls: {ex.Message}");
+                        }
+                    }
+                    else if (file.EndsWith(".xlsx", StringComparison.OrdinalIgnoreCase))
+                    {
+                        try
+                        {
+                            File.Copy(file, destFilePath, true);
+                            LogAsync($"Copied .xlsx file: {fileName}");
+                        }
+                        catch (Exception ex)
+                        {
+                            LogAsync($"Failed to copy {fileName}.xlsx: {ex.Message}");
+                        }
+                    }
+                }
+
+                MessageBox.Show("Conversion process completed.", "Done",
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            finally
+            {
+                if (excelApp != null)
+                {
+                    excelApp.Quit();
+                    System.Runtime.InteropServices.Marshal.ReleaseComObject(excelApp);
+                }
             }
         }
     }
