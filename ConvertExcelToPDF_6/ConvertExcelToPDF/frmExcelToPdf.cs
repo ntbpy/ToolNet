@@ -1,6 +1,7 @@
 ﻿using Spire.Pdf;
 using Spire.Pdf.Graphics;
 using Spire.Xls;
+using Spire.Xls.AI;
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -9,6 +10,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 using XlsFileFormat = Spire.Xls.FileFormat;
+using Excel = Microsoft.Office.Interop.Excel;
 
 namespace ConvertExcelToPDF
 {
@@ -328,10 +330,18 @@ namespace ConvertExcelToPDF
         {
             try
             {
+                //ExportExcelToPdf_Interop(excelPath, pdfPath, cancellationToken);
+                //return;
                 // Log detailed steps
+                if (Path.GetExtension(excelPath).Equals(".xls", StringComparison.OrdinalIgnoreCase))
+                {
+                    LogAsync($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] Detected legacy .xls file. Converting to .xlsx...").GetAwaiter().GetResult();
+                    excelPath = ConvertXlsToXlsx_Interop(excelPath, pdfPath);
+                    LogAsync($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] Conversion complete: {excelPath}").GetAwaiter().GetResult();
+                }
                 LogAsync($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] Loading Excel file: {Path.GetFileName(excelPath)}").GetAwaiter().GetResult();
                 using var workbook = new Workbook();
-                workbook.LoadFromFile(excelPath);
+                workbook.LoadFromFile(excelPath, false);
                 LogAsync($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] Loaded Excel file: {Path.GetFileName(excelPath)}").GetAwaiter().GetResult();
 
                 using var finalDoc = new PdfDocument();
@@ -373,6 +383,137 @@ namespace ConvertExcelToPDF
             catch (Exception ex)
             {
                 throw new Exception($"Failed to convert {Path.GetFileName(excelPath)} to PDF", ex);
+            }
+        }
+
+        private string ConvertXlsToXlsx_Interop(string sourcePath, string pdfPath)
+        {
+            Excel.Application excelApp = null;
+            Excel.Workbook workbook = null;
+
+            try
+            {
+                string baseDir = Path.GetDirectoryName(pdfPath);
+                if (string.IsNullOrEmpty(baseDir))
+                    baseDir = Path.GetTempPath();
+
+                string outputDir = Path.Combine(baseDir, "Converted");
+                if (!Directory.Exists(outputDir))
+                    Directory.CreateDirectory(outputDir);
+
+                string pdfFileName = Path.GetFileNameWithoutExtension(pdfPath);
+                string destPath = Path.Combine(outputDir, $"{pdfFileName}_converted.xlsx");
+
+                LogAsync($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] Converting {Path.GetFileName(sourcePath)} → {Path.GetFileName(destPath)} using Excel Interop...").GetAwaiter().GetResult();
+
+                excelApp = new Excel.Application
+                {
+                    DisplayAlerts = false,
+                    Visible = false,
+                    ScreenUpdating = false
+                };
+
+                workbook = excelApp.Workbooks.Open(
+                    sourcePath,
+                    ReadOnly: false,
+                    Editable: true,
+                    IgnoreReadOnlyRecommended: true
+                );
+
+                workbook.SaveAs(
+                    destPath,
+                    Excel.XlFileFormat.xlOpenXMLWorkbook,
+                    AccessMode: Excel.XlSaveAsAccessMode.xlNoChange
+                );
+
+                LogAsync($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] Conversion done: {destPath}").GetAwaiter().GetResult();
+
+                return destPath;
+            }
+            catch (Exception ex)
+            {
+                throw new Exception($"Failed to convert {Path.GetFileName(sourcePath)} to XLSX using Interop", ex);
+            }
+            finally
+            {
+                try
+                {
+                    if (workbook != null)
+                    {
+                        try
+                        {
+                            workbook.Close(false);
+                        }
+                        catch
+                        {
+                            // Có thể workbook đã tự đóng sau SaveAs
+                        }
+                        finally
+                        {
+                            System.Runtime.InteropServices.Marshal.FinalReleaseComObject(workbook);
+                        }
+                    }
+
+                    if (excelApp != null)
+                    {
+                        excelApp.Quit();
+                        System.Runtime.InteropServices.Marshal.FinalReleaseComObject(excelApp);
+                    }
+                }
+                catch (Exception ex2)
+                {
+                    LogAsync($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] Cleanup warning: {ex2.Message}").GetAwaiter().GetResult();
+                }
+
+                GC.Collect();
+                GC.WaitForPendingFinalizers();
+            }
+        }
+
+        private void ExportExcelToPdf_Interop(string excelPath, string pdfPath, CancellationToken cancellationToken)
+        {
+            Excel.Application excelApp = null;
+            Excel.Workbook excelWorkbook = null;
+            try
+            {
+                LogAsync($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] Using Excel Interop fallback for {Path.GetFileName(excelPath)}").GetAwaiter().GetResult();
+
+                excelApp = new Excel.Application
+                {
+                    Visible = false,
+                    ScreenUpdating = false,
+                    DisplayAlerts = false
+                };
+
+                excelWorkbook = excelApp.Workbooks.Open(excelPath);
+                cancellationToken.ThrowIfCancellationRequested();
+
+                // Export to PDF directly via Excel
+                excelWorkbook.ExportAsFixedFormat(Excel.XlFixedFormatType.xlTypePDF, pdfPath);
+
+                LogAsync($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] Excel Interop exported PDF successfully: {Path.GetFileName(pdfPath)}").GetAwaiter().GetResult();
+            }
+            catch (Exception ex)
+            {
+                LogAsync($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] Interop Excel failed: {ex.Message}").GetAwaiter().GetResult();
+                throw;
+            }
+            finally
+            {
+                if (excelWorkbook != null)
+                {
+                    excelWorkbook.Close(false);
+                    System.Runtime.InteropServices.Marshal.ReleaseComObject(excelWorkbook);
+                }
+
+                if (excelApp != null)
+                {
+                    excelApp.Quit();
+                    System.Runtime.InteropServices.Marshal.ReleaseComObject(excelApp);
+                }
+
+                GC.Collect();
+                GC.WaitForPendingFinalizers();
             }
         }
 
