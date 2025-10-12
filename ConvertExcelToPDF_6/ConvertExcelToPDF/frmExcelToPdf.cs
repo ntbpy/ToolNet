@@ -1,4 +1,5 @@
 ﻿using Spire.Pdf;
+using Spire.Pdf.Collections;
 using Spire.Pdf.Graphics;
 using Spire.Xls;
 using Spire.Xls.AI;
@@ -9,18 +10,21 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
-using XlsFileFormat = Spire.Xls.FileFormat;
 using Excel = Microsoft.Office.Interop.Excel;
+using XlsFileFormat = Spire.Xls.FileFormat;
 
 namespace ConvertExcelToPDF
 {
     public partial class frmExcelToPdf : Form
     {
-        private readonly string _tempFolder = Path.Combine(Path.GetTempPath(), "ExcelToPdfTemp");
+        private readonly string _tempFolder = Path.Combine(AppContext.BaseDirectory, "ExcelToPdfTemp");
         private string _logFilePath;
+        private List<string> _failedFiles = new List<string>();
+        private readonly List<string> _logBuffer = new List<string>();
 
         public frmExcelToPdf()
         {
+            _logFilePath = Path.Combine(AppContext.BaseDirectory, $"ConversionLog_{DateTime.Now:yyyyMMdd_HHmmss}.txt");
             InitializeComponent();
         }
 
@@ -145,6 +149,13 @@ namespace ConvertExcelToPDF
                 Console.WriteLine($"Logging error: {ex.Message}");
             }
         }
+
+        private void Log(string message)
+        {
+            // Ghi log sync vào file
+            File.AppendAllText(_logFilePath, $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {message}{Environment.NewLine}");
+        }
+
 
         private bool ValidateFolders(string excelFolder, string pdfFolder)
         {
@@ -568,15 +579,13 @@ namespace ConvertExcelToPDF
             }
 
             if (!Directory.Exists(destinationExcelFolder))
-            {
                 Directory.CreateDirectory(destinationExcelFolder);
-            }
 
             var excelFiles = Directory.EnumerateFiles(sourceExcelFolder)
-                .Where(file => file.EndsWith(".xls", StringComparison.OrdinalIgnoreCase) ||
-                               file.EndsWith(".xlsx", StringComparison.OrdinalIgnoreCase))
-                .GroupBy(file => Path.GetFileNameWithoutExtension(file), StringComparer.OrdinalIgnoreCase)
-                .Select(group => group.OrderByDescending(file => file.EndsWith(".xlsx", StringComparison.OrdinalIgnoreCase)).First())
+                .Where(f => f.EndsWith(".xls", StringComparison.OrdinalIgnoreCase) ||
+                            f.EndsWith(".xlsx", StringComparison.OrdinalIgnoreCase))
+                .GroupBy(f => Path.GetFileNameWithoutExtension(f), StringComparer.OrdinalIgnoreCase)
+                .Select(g => g.OrderByDescending(f => f.EndsWith(".xlsx", StringComparison.OrdinalIgnoreCase)).First())
                 .ToArray();
 
             if (excelFiles.Length == 0)
@@ -586,47 +595,145 @@ namespace ConvertExcelToPDF
                 return;
             }
 
+            _failedFiles.Clear();
+            lstFailedFiles.Items.Clear();
+            _logBuffer.Clear();
+
             Excel.Application excelApp = null;
             try
             {
                 excelApp = new Excel.Application();
                 excelApp.DisplayAlerts = false;
 
-                foreach (var file in excelFiles)
+                for (int i = 0; i < excelFiles.Length; i++)
                 {
+                    string file = excelFiles[i];
                     string fileName = Path.GetFileNameWithoutExtension(file);
                     string destFilePath = Path.Combine(destinationExcelFolder, fileName + ".xlsx");
+                    lblStatus.Text = $"Đang xử lý ({i + 1}/{excelFiles.Length}): {fileName}";
 
-                    if (file.EndsWith(".xls", StringComparison.OrdinalIgnoreCase))
+                    // Bỏ qua nếu file đích đã tồn tại
+                    if (File.Exists(destFilePath))
                     {
-                        try
+                        LogBuffer($"⏩ Skipped (already exists): {fileName}");
+                        continue;
+                    }
+
+                    try
+                    {
+                        if (file.EndsWith(".xls", StringComparison.OrdinalIgnoreCase))
+                        {
+                            var workbook = excelApp.Workbooks.Open(file);
+                            workbook.SaveAs(destFilePath, Excel.XlFileFormat.xlOpenXMLWorkbook);
+                            workbook.Close(false);
+                            LogBuffer($"✅ Converted .xls to .xlsx: {fileName}");
+                        }
+                        else
+                        {
+                            File.Copy(file, destFilePath, true);
+                            LogBuffer($"📄 Copied .xlsx file: {fileName}");
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _failedFiles.Add(file);
+                        lstFailedFiles.Items.Add(Path.GetFileName(file));
+                        LogBuffer($"❌ Failed {fileName}: {ex.Message}");
+                    }
+                    finally
+                    {
+                        // Giải phóng COM object giữa các vòng
+                        GC.Collect();
+                        GC.WaitForPendingFinalizers();
+                    }
+                }
+
+                // ✅ Ghi toàn bộ log ra file 1 lần
+                FlushLog();
+
+                MessageBox.Show($"Conversion completed.\n\nSuccess: {excelFiles.Length - _failedFiles.Count}\nFailed: {_failedFiles.Count}",
+                    "Done", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            finally
+            {
+                if (excelApp != null)
+                {
+                    excelApp.Quit();
+                    System.Runtime.InteropServices.Marshal.ReleaseComObject(excelApp);
+                    excelApp = null;
+                }
+
+                GC.Collect();
+                GC.WaitForPendingFinalizers();
+            }
+
+            bnRetryFailed.Enabled = _failedFiles.Count > 0;
+        }
+
+        private void LogBuffer(string message)
+        {
+            string logLine = $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {message}";
+            _logBuffer.Add(logLine);
+        }
+
+        private void FlushLog()
+        {
+            try
+            {
+                File.AppendAllLines(_logFilePath, _logBuffer);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Logging error: {ex.Message}");
+            }
+        }
+
+        private async void bnRetryFailed_ClickAsync(object sender, EventArgs e)
+        {
+            if (_failedFiles.Count == 0)
+            {
+                MessageBox.Show("No failed files to retry.", "Information",
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            bnRetryFailed.Enabled = false;
+
+            Excel.Application excelApp = null;
+            var stillFailed = new List<string>();
+
+            try
+            {
+                excelApp = new Excel.Application();
+                excelApp.DisplayAlerts = false;
+
+                foreach (var file in _failedFiles)
+                {
+                    string fileName = Path.GetFileNameWithoutExtension(file);
+                    string destFolder = txtDesExcelFolder.Text.Trim();
+                    string destFilePath = Path.Combine(destFolder, fileName + ".xlsx");
+
+                    try
+                    {
+                        if (file.EndsWith(".xls", StringComparison.OrdinalIgnoreCase))
                         {
                             Excel.Workbook workbook = excelApp.Workbooks.Open(file);
                             workbook.SaveAs(destFilePath, Excel.XlFileFormat.xlOpenXMLWorkbook);
                             workbook.Close();
-                            LogAsync($"Converted .xls to .xlsx: {fileName}");
+                            await LogAsync($"✅ Retry success: {fileName}");
                         }
-                        catch (Exception ex)
-                        {
-                            LogAsync($"Failed to convert {fileName}.xls: {ex.Message}");
-                        }
-                    }
-                    else if (file.EndsWith(".xlsx", StringComparison.OrdinalIgnoreCase))
-                    {
-                        try
+                        else
                         {
                             File.Copy(file, destFilePath, true);
-                            LogAsync($"Copied .xlsx file: {fileName}");
-                        }
-                        catch (Exception ex)
-                        {
-                            LogAsync($"Failed to copy {fileName}.xlsx: {ex.Message}");
+                            await LogAsync($"✅ Retry copy success: {fileName}");
                         }
                     }
+                    catch (Exception ex)
+                    {
+                        stillFailed.Add(file);
+                        await LogAsync($"❌ Retry failed {fileName}: {ex.Message}");
+                    }
                 }
-
-                MessageBox.Show("Conversion process completed.", "Done",
-                    MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
             finally
             {
@@ -636,6 +743,24 @@ namespace ConvertExcelToPDF
                     System.Runtime.InteropServices.Marshal.ReleaseComObject(excelApp);
                 }
             }
+
+            _failedFiles = stillFailed;
+            lstFailedFiles.Items.Clear();
+            foreach (var file in _failedFiles)
+                lstFailedFiles.Items.Add(Path.GetFileName(file));
+
+            if (_failedFiles.Count > 0)
+            {
+                MessageBox.Show($"Some files still failed: {_failedFiles.Count}", "Retry Completed",
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+            else
+            {
+                MessageBox.Show("All previously failed files were successfully converted!", "Retry Completed",
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+
+            bnRetryFailed.Enabled = _failedFiles.Count > 0;
         }
     }
 }
