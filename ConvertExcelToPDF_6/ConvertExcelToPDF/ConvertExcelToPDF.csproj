@@ -24,6 +24,7 @@
   <ItemGroup>
     <PackageReference Include="FreeSpire.PDF" Version="10.2.0" />
     <PackageReference Include="FreeSpire.XLS" Version="14.2.0" />
+    <PackageReference Include="iTextSharp" Version="5.5.13.4" />
   </ItemGroup>
 
 </Project>

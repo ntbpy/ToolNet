@@ -342,8 +342,6 @@ namespace ConvertExcelToPDF
             try
             {
                 LogAsync($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] Starting conversion: {Path.GetFileName(excelPath)}").GetAwaiter().GetResult();
-
-
                 // Load Excel
                 using var workbook = new Workbook();
                 workbook.LoadFromFile(excelPath);
@@ -356,17 +354,106 @@ namespace ConvertExcelToPDF
                     return;
                 }
 
+                // Try original Spire.PDF merge method first
+                bool mergedWithSpire = TrySpireMerge(workbook, pdfPath, cancellationToken);
+
+                if (!mergedWithSpire)
+                {
+                    // Fallback to iTextSharp merge
+                    LogAsync($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] Spire merge failed. Trying iTextSharp merge...").GetAwaiter().GetResult();
+                    MergeWithITextSharp(workbook, pdfPath, cancellationToken);
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                LogAsync($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] Conversion cancelled for {Path.GetFileName(excelPath)}").GetAwaiter().GetResult();
+                throw;
+            }
+            catch (Exception ex)
+            {
+                LogAsync($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] ERROR converting {Path.GetFileName(excelPath)}: {ex}").GetAwaiter().GetResult();
+                throw new Exception($"Failed to convert {Path.GetFileName(excelPath)} to PDF. See log for details.", ex);
+            }
+        }
+
+        private bool TrySpireMerge(Workbook workbook, string pdfPath, CancellationToken cancellationToken)
+        {
+            try
+            {
+                LogAsync($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] Attempting Spire.PDF merge...").GetAwaiter().GetResult();
+
                 using var finalDoc = new PdfDocument();
                 var tempParts = new List<(PdfDocument doc, MemoryStream stream)>();
 
+                try
+                {
+                    int sheetIndex = 0;
+                    foreach (Worksheet sheet in workbook.Worksheets)
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+                        sheetIndex++;
+                        string sheetName = string.IsNullOrWhiteSpace(sheet.Name) ? $"Sheet{sheetIndex}" : sheet.Name;
+                        LogAsync($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] Processing sheet: {sheetName}").GetAwaiter().GetResult();
+
+                        using var singleSheetWorkbook = new Workbook();
+                        singleSheetWorkbook.Worksheets.Clear();
+                        singleSheetWorkbook.Worksheets.AddCopy(sheet);
+
+                        var ws = singleSheetWorkbook.Worksheets[0];
+                        ws.PageSetup.PrintArea = null;
+                        ws.PageSetup.FitToPagesWide = 1;
+                        ws.PageSetup.FitToPagesTall = 1;
+                        ws.PageSetup.IsPrintHeadings = false;
+                        ws.PageSetup.IsPrintGridlines = false;
+
+                        var pdfStream = new MemoryStream();
+                        singleSheetWorkbook.SaveToStream(pdfStream, XlsFileFormat.PDF);
+                        pdfStream.Position = 0;
+
+                        var partDoc = new PdfDocument(pdfStream);
+                        tempParts.Add((partDoc, pdfStream));
+
+                        finalDoc.AppendPage(partDoc);
+                        LogAsync($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] Appended {sheetName} to final PDF.").GetAwaiter().GetResult();
+                    }
+
+                    cancellationToken.ThrowIfCancellationRequested();
+                    LogAsync($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] Saving merged PDF: {Path.GetFileName(pdfPath)}").GetAwaiter().GetResult();
+                    finalDoc.SaveToFile(pdfPath);
+                    LogAsync($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] ✓ Successfully saved with Spire.PDF: {pdfPath}").GetAwaiter().GetResult();
+
+                    return true;
+                }
+                finally
+                {
+                    foreach (var (doc, stream) in tempParts)
+                    {
+                        doc.Dispose();
+                        stream.Dispose();
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                LogAsync($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] Spire.PDF merge failed: {ex.Message}").GetAwaiter().GetResult();
+                return false;
+            }
+        }
+
+        private void MergeWithITextSharp(Workbook workbook, string pdfPath, CancellationToken cancellationToken)
+        {
+            var tempPdfFiles = new List<string>();
+
+            try
+            {
+                // Step 1: Export each sheet to temporary PDF file
                 int sheetIndex = 0;
                 foreach (Worksheet sheet in workbook.Worksheets)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
                     sheetIndex++;
                     string sheetName = string.IsNullOrWhiteSpace(sheet.Name) ? $"Sheet{sheetIndex}" : sheet.Name;
-
-                    LogAsync($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] Processing sheet: {sheetName}").GetAwaiter().GetResult();
+                    LogAsync($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] Exporting sheet with iTextSharp: {sheetName}").GetAwaiter().GetResult();
 
                     using var singleSheetWorkbook = new Workbook();
                     singleSheetWorkbook.Worksheets.Clear();
@@ -379,37 +466,53 @@ namespace ConvertExcelToPDF
                     ws.PageSetup.IsPrintHeadings = false;
                     ws.PageSetup.IsPrintGridlines = false;
 
-                    var pdfStream = new MemoryStream();
-                    singleSheetWorkbook.SaveToStream(pdfStream, XlsFileFormat.PDF);
-                    pdfStream.Position = 0;
-
-                    var partDoc = new PdfDocument(pdfStream);
-                    tempParts.Add((partDoc, pdfStream));
-
-                    finalDoc.AppendPage(partDoc);
-                    LogAsync($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] Appended {sheetName} to final PDF.").GetAwaiter().GetResult();
+                    string tempPdfPath = Path.Combine(Path.GetTempPath(), $"sheet_{sheetIndex}_{Guid.NewGuid()}.pdf");
+                    singleSheetWorkbook.SaveToFile(tempPdfPath, XlsFileFormat.PDF);
+                    tempPdfFiles.Add(tempPdfPath);
                 }
-
 
                 cancellationToken.ThrowIfCancellationRequested();
-                LogAsync($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] Saving merged PDF: {Path.GetFileName(pdfPath)}").GetAwaiter().GetResult();
-                finalDoc.SaveToFile(pdfPath);
-                LogAsync($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] Successfully saved: {pdfPath}").GetAwaiter().GetResult();
 
-                foreach (var (doc, stream) in tempParts)
+                // Step 2: Merge all PDFs using iTextSharp
+                LogAsync($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] Merging {tempPdfFiles.Count} PDFs with iTextSharp...").GetAwaiter().GetResult();
+
+                using (var outputStream = new FileStream(pdfPath, FileMode.Create))
                 {
-                    doc.Dispose();
-                    stream.Dispose();
+                    var document = new iTextSharp.text.Document();
+                    var pdfCopy = new iTextSharp.text.pdf.PdfCopy(document, outputStream);
+                    document.Open();
+
+                    foreach (var tempPdfPath in tempPdfFiles)
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+
+                        using (var reader = new iTextSharp.text.pdf.PdfReader(tempPdfPath))
+                        {
+                            for (int pageNum = 1; pageNum <= reader.NumberOfPages; pageNum++)
+                            {
+                                var page = pdfCopy.GetImportedPage(reader, pageNum);
+                                pdfCopy.AddPage(page);
+                            }
+                        }
+                    }
+
+                    document.Close();
                 }
+
+                LogAsync($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] ✓ Successfully merged with iTextSharp: {pdfPath}").GetAwaiter().GetResult();
             }
-            catch (OperationCanceledException)
+            finally
             {
-                LogAsync($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] Conversion cancelled for {Path.GetFileName(excelPath)}").GetAwaiter().GetResult();
-            }
-            catch (Exception ex)
-            {
-                LogAsync($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] ERROR converting {Path.GetFileName(excelPath)}: {ex}").GetAwaiter().GetResult();
-                throw new Exception($"Failed to convert {Path.GetFileName(excelPath)} to PDF. See log for details.", ex);
+                // Clean up temporary files
+                foreach (var tempPdf in tempPdfFiles)
+                {
+                    try
+                    {
+                        if (File.Exists(tempPdf))
+                            File.Delete(tempPdf);
+                    }
+                    catch { }
+                }
             }
         }
 
